@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import Optional
 
 from seleniumbase import SB
-from seleniumbase.common.exceptions import TimeoutException
+from seleniumbase.common.exceptions import TimeoutException, NoSuchElementException
 
 # ================== 配置 ==================
 BETADASH_LOGIN_URL = "https://betadash.lunes.host/login"
 OUTPUT_DIR = Path("output/screenshots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+EMAIL_SELECTOR = 'input#email, input[name="email"], input[type="email"]'
+PASSWORD_SELECTOR = 'input#password, input[name="password"], input[type="password"]'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -171,6 +174,7 @@ def is_cloudflare_interstitial(sb) -> bool:
         has_login_form = sb.execute_script('''
             return !!(document.querySelector('input#email')
                    || document.querySelector('input[name="email"]')
+                   || document.querySelector('input[type="email"]')
                    || document.querySelector('form[action*="login"]'));
         ''')
         if has_login_form:
@@ -208,7 +212,7 @@ def is_cloudflare_interstitial(sb) -> bool:
             return True
 
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -235,7 +239,7 @@ def bypass_cloudflare_interstitial(sb, email: str, max_attempts: int = 3) -> boo
         if not is_cloudflare_interstitial(sb):
             logger.info("✅ 刷新后 Cloudflare 挑战已消失")
             return True
-    except:
+    except Exception:
         pass
     return False
 
@@ -257,7 +261,7 @@ def wait_for_turnstile_success(sb, timeout: int = 30) -> bool:
             if success:
                 logger.info("✅ Turnstile 验证成功")
                 return True
-        except:
+        except Exception:
             pass
         time.sleep(1)
     logger.warning("⏰ Turnstile 验证超时")
@@ -272,11 +276,11 @@ def clear_browser_state(sb):
             try { window.localStorage.clear(); } catch(e) {}
             try { window.sessionStorage.clear(); } catch(e) {}
         ''')
-    except:
+    except Exception:
         pass
     try:
         sb.delete_all_cookies()
-    except:
+    except Exception:
         pass
     logger.info("🧹 浏览器状态已清理")
 
@@ -320,10 +324,10 @@ def handle_initial_page(sb, email: str) -> Optional[str]:
     logger.info("等待登录表单...")
     for wait_round in range(3):
         try:
-            sb.wait_for_element_visible('input#email', timeout=10)
+            sb.wait_for_element_visible(EMAIL_SELECTOR, timeout=10)
             logger.info("✅ 找到登录表单")
             return "need_login"
-        except TimeoutException:
+        except (TimeoutException, NoSuchElementException, Exception):
             logger.info(f"第 {wait_round + 1} 次等待表单超时，检查页面状态...")
             check_and_exit_on_rate_limit(sb, email)
             if is_cloudflare_interstitial(sb):
@@ -331,11 +335,19 @@ def handle_initial_page(sb, email: str) -> Optional[str]:
                 bypass_cloudflare_interstitial(sb, email, max_attempts=2)
                 time.sleep(3)
             else:
+                try:
+                    sb.uc_gui_click_captcha()
+                except Exception:
+                    pass
                 time.sleep(3)
 
     sp = screenshot_path("02-no-form")
     safe_screenshot(sb, sp)
-    logger.error("未找到登录表单")
+    try:
+        page_title = sb.get_title()
+    except Exception:
+        page_title = "Unknown"
+    logger.error(f"未找到登录表单，当前页面标题: {page_title}")
     return None
 
 
@@ -344,17 +356,17 @@ def fill_and_submit(sb, email: str, password: str) -> bool:
     logger.info("填写登录信息...")
 
     try:
-        sb.clear('input#email')
-    except:
+        sb.clear(EMAIL_SELECTOR)
+    except Exception:
         pass
-    sb.type('input#email', email)
+    sb.type(EMAIL_SELECTOR, email)
     time.sleep(0.5)
 
     try:
-        sb.clear('input#password')
-    except:
+        sb.clear(PASSWORD_SELECTOR)
+    except Exception:
         pass
-    sb.type('input#password', password)
+    sb.type(PASSWORD_SELECTOR, password)
     time.sleep(0.5)
 
     sp = screenshot_path("03-form-filled")
@@ -389,7 +401,7 @@ def fill_and_submit(sb, email: str, password: str) -> bool:
             submitted = True
             logger.info(f"通过 {selector} 提交")
             break
-        except:
+        except Exception:
             continue
 
     if not submitted:
@@ -397,7 +409,7 @@ def fill_and_submit(sb, email: str, password: str) -> bool:
             sb.execute_script('document.querySelector("form").submit()')
             submitted = True
             logger.info("通过 JS 提交")
-        except:
+        except Exception:
             logger.error("所有提交方式都失败")
             return False
 
@@ -417,7 +429,7 @@ def fill_and_submit(sb, email: str, password: str) -> bool:
             ''')
             if error_msg:
                 logger.error(f"登录错误提示: {error_msg}")
-        except:
+        except Exception:
             pass
         sp = screenshot_path("05-login-failed")
         safe_screenshot(sb, sp)
@@ -463,14 +475,14 @@ def navigate_to_server(sb, email: str) -> tuple[bool, str, Optional[str]]:
         sb.wait_for_element_visible(primary_selector, timeout=15)
         found_selector = primary_selector
         logger.info("✅ 找到服务器卡片")
-    except TimeoutException:
+    except (TimeoutException, NoSuchElementException, Exception):
         for sel in alt_selectors:
             try:
                 sb.wait_for_element_visible(sel, timeout=5)
                 found_selector = sel
                 logger.info(f"✅ 通过备选选择器找到服务器: {sel}")
                 break
-            except:
+            except Exception:
                 continue
 
     if found_selector is None:
@@ -501,20 +513,20 @@ def navigate_to_server(sb, email: str) -> tuple[bool, str, Optional[str]]:
     try:
         href = sb.execute_script(f"return document.querySelector('{found_selector}').getAttribute('href') || '';")
         card_id = _extract_server_id(href) if href else "Unknown"
-    except:
+    except Exception:
         card_id = "Unknown"
     logger.info(f"服务器卡片 ID: {mask_server_id(card_id)}")
 
     logger.info("进入服务器详情页...")
     try:
         sb.click(found_selector)
-    except:
+    except Exception:
         try:
             sb.execute_script(f'''
                 var card = document.querySelector('{found_selector}');
                 if (card) card.click();
             ''')
-        except:
+        except Exception:
             logger.error("无法点击服务器卡片")
             return False, "CLICK_ERROR", sp_dash
 
@@ -569,7 +581,8 @@ def betadash_login(
                 init_status = handle_initial_page(sb, email)
                 if init_status is None:
                     result["message"] = "Cloudflare 绕过失败或登录表单未找到"
-                    result["screenshot"] = screenshot_path("02-cf-failed")
+                    no_form_files = sorted(OUTPUT_DIR.glob("*-02-*.png"))
+                    result["screenshot"] = str(no_form_files[-1]) if no_form_files else screenshot_path("02-cf-failed")
                     logger.warning(result["message"])
                     break
 
@@ -577,7 +590,8 @@ def betadash_login(
                     login_ok = fill_and_submit(sb, email, password)
                     if not login_ok:
                         result["message"] = "登录失败（凭据错误或提交异常）"
-                        result["screenshot"] = screenshot_path("05-login-failed")
+                        fail_files = sorted(OUTPUT_DIR.glob("*-05-login-failed.png"))
+                        result["screenshot"] = str(fail_files[-1]) if fail_files else screenshot_path("05-login-failed")
                         logger.warning(result["message"])
                         break
 
